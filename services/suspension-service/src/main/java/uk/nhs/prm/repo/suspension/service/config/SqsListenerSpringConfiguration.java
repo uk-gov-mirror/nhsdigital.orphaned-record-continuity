@@ -3,8 +3,6 @@ package uk.nhs.prm.repo.suspension.service.config;
 import com.amazon.sqs.javamessaging.ProviderConfiguration;
 import com.amazon.sqs.javamessaging.SQSConnectionFactory;
 import com.amazon.sqs.javamessaging.SQSSession;
-import com.amazonaws.services.sqs.AmazonSQSAsync;
-import com.amazonaws.services.sqs.AmazonSQSAsyncClientBuilder;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -15,6 +13,7 @@ import org.springframework.jms.config.DefaultJmsListenerContainerFactory;
 import org.springframework.jms.config.SimpleJmsListenerEndpoint;
 import org.springframework.jms.listener.DefaultMessageListenerContainer;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import software.amazon.awssdk.services.sqs.SqsClient;
 import uk.nhs.prm.repo.suspension.service.suspensionsevents.SuspensionMessageProcessor;
 import uk.nhs.prm.repo.suspension.service.suspensionsevents.SuspensionsEventListener;
 
@@ -42,11 +41,6 @@ public class SqsListenerSpringConfiguration {
     private final Tracer tracer;
 
     @Bean
-    public AmazonSQSAsync amazonSQSAsync() {
-        return AmazonSQSAsyncClientBuilder.defaultClient();
-    }
-
-    @Bean
     public DefaultMessageListenerContainer jmsListener(DefaultJmsListenerContainerFactory jmsListenerContainerFactory) {
         SimpleJmsListenerEndpoint simpleJmsListenerEndpoint = new SimpleJmsListenerEndpoint();
         simpleJmsListenerEndpoint.setMessageListener(new SuspensionsEventListener(suspensionsEventProcessor, tracer));
@@ -55,9 +49,9 @@ public class SqsListenerSpringConfiguration {
     }
 
     @Bean
-    public DefaultJmsListenerContainerFactory jmsListenerContainerFactory(AmazonSQSAsync amazonSQS) {
+    public DefaultJmsListenerContainerFactory jmsListenerContainerFactory(SqsClient sqsClient) {
         ProviderConfiguration providerConfiguration = new ProviderConfiguration().withNumberOfMessagesToPrefetch(0);
-        SQSConnectionFactory connectionFactory = new SQSConnectionFactory(providerConfiguration, amazonSQS);
+        SQSConnectionFactory connectionFactory = new SQSConnectionFactory(providerConfiguration, sqsClient);
         DefaultJmsListenerContainerFactory factory = new DefaultJmsListenerContainerFactory();
         factory.setConcurrency(concurrencyMinMax);
         factory.setSessionAcknowledgeMode(SQSSession.UNORDERED_ACKNOWLEDGE);

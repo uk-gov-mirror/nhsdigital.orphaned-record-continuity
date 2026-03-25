@@ -1,12 +1,10 @@
 package uk.nhs.prm.repo.suspension.service.suspensionsevents;
 
-import com.amazonaws.services.sqs.AmazonSQSAsync;
-import com.amazonaws.services.sqs.model.GetQueueAttributesResult;
-import com.amazonaws.services.sqs.model.PurgeQueueRequest;
-import com.amazonaws.services.sqs.model.SendMessageBatchRequest;
-import com.amazonaws.services.sqs.model.SendMessageBatchRequestEntry;
 import com.github.tomakehurst.wiremock.WireMockServer;
+import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -17,6 +15,12 @@ import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.context.junit.jupiter.SpringExtension;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest;
+import software.amazon.awssdk.services.sqs.model.PurgeQueueRequest;
+import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
+import software.amazon.awssdk.services.sqs.model.SendMessageBatchRequest;
+import software.amazon.awssdk.services.sqs.model.SendMessageBatchRequestEntry;
 import uk.nhs.prm.repo.suspension.service.infra.LocalStackAwsConfig;
 
 import java.time.Duration;
@@ -32,15 +36,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@SpringBootTest()
+@SpringBootTest
 @ActiveProfiles("test")
 @ExtendWith(SpringExtension.class)
-@ContextConfiguration( classes = LocalStackAwsConfig.class)
+@ContextConfiguration(classes = LocalStackAwsConfig.class)
 @DirtiesContext
 public class SuspensionThrottlingTest {
 
     @Autowired
-    private AmazonSQSAsync sqs;
+    private SqsClient sqs;
 
     @Value("${aws.incomingQueueName}")
     private String suspensionsQueueName;
@@ -51,13 +55,15 @@ public class SuspensionThrottlingTest {
     private WireMockServer stubPdsAdaptor;
 
     private String mofUpdatedQueueUrl;
+
     private String suspensionQueueUrl;
 
     @BeforeEach
     public void setUp() {
         stubPdsAdaptor = initializeWebServer();
-        mofUpdatedQueueUrl = sqs.getQueueUrl(mofUpdatedQueueName).getQueueUrl();
-        suspensionQueueUrl = sqs.getQueueUrl(suspensionsQueueName).getQueueUrl();
+        configureFor("localhost", stubPdsAdaptor.port());
+        mofUpdatedQueueUrl = sqs.getQueueUrl(builder -> builder.queueName(mofUpdatedQueueName)).queueUrl();
+        suspensionQueueUrl = sqs.getQueueUrl(builder -> builder.queueName(suspensionsQueueName)).queueUrl();
         purgeQueues(suspensionQueueUrl, mofUpdatedQueueUrl);
     }
 
@@ -115,10 +121,10 @@ public class SuspensionThrottlingTest {
         var nhsNumber = randomNhsNumber();
 
         setPdsRetryMessage(nhsNumber);
-        stubbinForGenericPdsResponses(0,0);
+        stubbinForGenericPdsResponses(0, 0);
         var startingTime = Instant.now();
 
-        sqs.sendMessage(suspensionQueueUrl, getSuspensionEvent(nhsNumber));
+        sqs.sendMessage(builder -> builder.queueUrl(suspensionQueueUrl).messageBody(getSuspensionEvent(nhsNumber)));
 
         await().atMost(20, TimeUnit.SECONDS).untilAsserted(() -> assertTrue(isQueueEmpty(suspensionQueueUrl)));
 
@@ -140,7 +146,7 @@ public class SuspensionThrottlingTest {
         var startingTime = Instant.now();
 
         sendMultipleBatchesOf10Messages(suspensionQueueUrl, 2);
-        sqs.sendMessage(suspensionQueueUrl, getSuspensionEvent(nhsNumber));
+        sqs.sendMessage(builder -> builder.queueUrl(suspensionQueueUrl).messageBody(getSuspensionEvent(nhsNumber)));
 
         await().atMost(120, TimeUnit.SECONDS).untilAsserted(() -> assertTrue(isQueueEmpty(suspensionQueueUrl)));
 
@@ -173,7 +179,7 @@ public class SuspensionThrottlingTest {
                 .inScenario("Retry Scenario")
                 .whenScenarioStateIs(startingState)
                 .willReturn(aResponse()
-                        .withStatus(500) // request unsuccessful with status code 500
+                        .withStatus(500)
                         .withHeader("Content-Type", "text/xml")
                         .withBody("<response>Some content</response>"))
                 .willSetStateTo(finishedState));
@@ -204,29 +210,35 @@ public class SuspensionThrottlingTest {
     }
 
     private boolean isQueueEmpty(String queueUrl) {
-        List<String> attributeList = new ArrayList<>();
-        attributeList.add("ApproximateNumberOfMessagesNotVisible");
-        attributeList.add("ApproximateNumberOfMessages");
-        GetQueueAttributesResult getQueueAttributesResult = sqs.getQueueAttributes(queueUrl, attributeList);
+        var getQueueAttributesResult = sqs.getQueueAttributes(GetQueueAttributesRequest.builder()
+                .queueUrl(queueUrl)
+                .attributeNames(
+                        QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES_NOT_VISIBLE,
+                        QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES)
+                .build());
 
-        var numberOfMessageNotVisible = Integer.valueOf(getQueueAttributesResult.getAttributes().get("ApproximateNumberOfMessagesNotVisible"));
-        var numberOfMessageVisible = Integer.valueOf(getQueueAttributesResult.getAttributes().get("ApproximateNumberOfMessages"));
+        var numberOfMessageNotVisible = Integer.parseInt(
+                getQueueAttributesResult.attributes().get(QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES_NOT_VISIBLE));
+        var numberOfMessageVisible = Integer.parseInt(
+                getQueueAttributesResult.attributes().get(QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES));
 
         return (numberOfMessageVisible == 0 && numberOfMessageNotVisible == 0);
     }
 
     private SendMessageBatchRequest createBatchOfTenRequest(String queueUrl) {
-        SendMessageBatchRequest sendMessageBatchRequest = new SendMessageBatchRequest();
-        sendMessageBatchRequest.setEntries(generateSendMessageBatchRequestEntryList());
-        sendMessageBatchRequest.setQueueUrl(queueUrl);
-
-        return sendMessageBatchRequest;
+        return SendMessageBatchRequest.builder()
+                .queueUrl(queueUrl)
+                .entries(generateSendMessageBatchRequestEntryList())
+                .build();
     }
 
     private List<SendMessageBatchRequestEntry> generateSendMessageBatchRequestEntryList() {
         List<SendMessageBatchRequestEntry> requestEntries = new ArrayList<>();
         for (int i = 0; i < 10; i++) {
-            requestEntries.add(new SendMessageBatchRequestEntry(UUID.randomUUID().toString(), getSuspensionEvent()));
+            requestEntries.add(SendMessageBatchRequestEntry.builder()
+                    .id(UUID.randomUUID().toString())
+                    .messageBody(getSuspensionEvent())
+                    .build());
         }
         return requestEntries;
     }
@@ -268,7 +280,7 @@ public class SuspensionThrottlingTest {
     }
 
     private void purgeQueues(String queueUrl, String mofUpdatedQueueUrl) {
-        sqs.purgeQueue(new PurgeQueueRequest(queueUrl));
-        sqs.purgeQueue(new PurgeQueueRequest(mofUpdatedQueueUrl));
+        sqs.purgeQueue(PurgeQueueRequest.builder().queueUrl(queueUrl).build());
+        sqs.purgeQueue(PurgeQueueRequest.builder().queueUrl(mofUpdatedQueueUrl).build());
     }
 }
