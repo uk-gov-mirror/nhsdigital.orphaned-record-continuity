@@ -55,8 +55,14 @@ jobs:
         working-directory: ./services/${{ inputs.service }}
         run: npm install
 
+      # https://github.com/localstack/setup-localstack/issues/65
+      - name: Install LocalStack manually
+        run: |
+          pip install --upgrade pip
+          pip install localstack==4.14.0
+
       - name: Start LocalStack
-        uses: LocalStack/setup-localstack@v0.3.0
+        uses: LocalStack/setup-localstack@v0.3.1
         env:
           LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: "1" # https://github.com/localstack/setup-localstack/issues/65
         with:
